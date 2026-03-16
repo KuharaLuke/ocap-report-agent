@@ -1,0 +1,12 @@
+services:
+  report-generator:
+    build: .
+    environment:
+      - LLM_URL=http://host.docker.internal:1234
+      - DATA_FILE=/app/data/mission.json.gz
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - ./2026_03_08__21_33_RandomPatrolGenerator.json.gz:/app/data/mission.json.gz:ro
+      - ./test_output:/app/output
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

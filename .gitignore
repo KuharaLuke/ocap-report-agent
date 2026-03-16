@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+*.secret
+credentials*
+
+# Claude Code (local settings, plans, memory)
+.claude/
+
+# Mission replay data (large binary files)
+*.json.gz
+
+# Downloaded map tiles (large, re-downloadable via scrape_tiles.py)
+map_tiles/
+
+# Generated output (re-generable)
+test_output/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
