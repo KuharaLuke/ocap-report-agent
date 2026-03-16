@@ -12,18 +12,28 @@ from models.mission import Mission
 class ReportBuilder:
     """Transforms parsed OCAP2 mission data into a structured briefing document.
 
-    The output is designed to fit within ~1500 tokens so that a small LLM
+    The output is designed to fit within ~2000 tokens so that a small LLM
     (e.g. Qwen 3.5 9B) can produce a coherent after-action report from it.
+    Follows the TF405 AAR template structure.
     """
 
     NUM_PHASES = 5
 
-    def __init__(self, mission: Mission) -> None:
+    def __init__(self, mission: Mission, terrain_data: dict | None = None) -> None:
         self.mission = mission
+        self.terrain_data = terrain_data
+        self._terrain_tiles = terrain_data.get("tiles", {}) if terrain_data else {}
+        self._terrain_zoom = terrain_data.get("zoom_level", 2) if terrain_data else 2
+        self._world_size = (
+            terrain_data.get("world_size")
+            if terrain_data
+            else None
+        )
 
     def build(self) -> str:
         sections = [
             self._mission_header(),
+            self._terrain_overview(),
             self._player_roster(),
             self._timeline_phases(),
             self._notable_engagements(),
@@ -31,7 +41,54 @@ class ReportBuilder:
             self._vehicle_assets(),
             self._casualty_summary(),
         ]
-        return "\n\n".join(sections)
+        return "\n\n".join(s for s in sections if s)
+
+    # ------------------------------------------------------------------
+    # Terrain helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coords_to_grid(x: float, y: float) -> str:
+        """Convert world coordinates to a 4-digit MGRS-style grid reference."""
+        gx = max(0, int(x / 100))
+        gy = max(0, int(y / 100))
+        return f"{gx:02d}{gy:02d}"
+
+    def _get_terrain_at(self, x: float, y: float) -> dict | None:
+        """Look up terrain analysis for the tile containing world coords (x, y)."""
+        if not self._terrain_tiles or not self._world_size:
+            return None
+        grid_size = 2 ** self._terrain_zoom
+        tile_size = self._world_size / grid_size
+        tile_x = min(int(x / tile_size), grid_size - 1)
+        tile_y = min(int(y / tile_size), grid_size - 1)
+        tile_x = max(0, tile_x)
+        tile_y = max(0, tile_y)
+        return self._terrain_tiles.get(f"{tile_x}_{tile_y}")
+
+    def _describe_terrain(self, x: float, y: float) -> str:
+        """Return a short terrain description for a position, or empty string."""
+        tile = self._get_terrain_at(x, y)
+        if not tile or tile.get("parse_error"):
+            return ""
+        terrain_type = tile.get("terrain_type", "")
+        features = tile.get("geological_features", [])
+        feature_types = [f.get("type", "") for f in features[:2]]
+        parts = [terrain_type] if terrain_type else []
+        if feature_types:
+            parts.append("/".join(feature_types) + " terrain")
+        return ", ".join(parts) if parts else ""
+
+    def _kill_position(self, kill: KillEvent) -> tuple[float, float] | None:
+        """Get the victim's world position at the frame of a kill event."""
+        m = self.mission
+        victim = m.get_entity(kill.victim_id)
+        if not victim:
+            return None
+        pos = victim.position_at(kill.frame)
+        if not pos:
+            return None
+        return (pos.x, pos.y)
 
     # ------------------------------------------------------------------
     # Section builders
@@ -51,6 +108,42 @@ class ReportBuilder:
             f"GAME DATE: {game_date}\n"
             f"REAL DATE: {real_date}"
         )
+
+    def _terrain_overview(self) -> str:
+        """AO terrain summary from terrain analysis data."""
+        if not self.terrain_data:
+            return ""
+        summary = self.terrain_data.get("summary", {})
+        if not summary:
+            return ""
+
+        dominant = summary.get("dominant_terrain", "unknown")
+        dist = summary.get("terrain_distribution", {})
+        has_urban = summary.get("has_urban_areas", False)
+        has_water = summary.get("has_water", False)
+        building_count = summary.get("building_count", 0)
+        geo_count = summary.get("geological_feature_count", 0)
+
+        terrain_types = ", ".join(
+            f"{t} ({c})" for t, c in sorted(dist.items(), key=lambda x: -x[1])
+        )
+
+        parts = [f"AO TERRAIN: Dominant terrain type: {dominant}."]
+        if terrain_types:
+            parts.append(f"  Distribution: {terrain_types}")
+        features = []
+        if has_urban:
+            features.append("urban areas present")
+        if has_water:
+            features.append("water features present")
+        if building_count:
+            features.append(f"{building_count} structures identified")
+        if geo_count:
+            features.append(f"{geo_count} geological features identified")
+        if features:
+            parts.append(f"  Features: {', '.join(features)}")
+
+        return "\n".join(parts)
 
     def _player_roster(self) -> str:
         m = self.mission
@@ -78,7 +171,6 @@ class ReportBuilder:
         later_kills = [k for k in m.kills_by(player.id) if k.frame > death_frame]
         if later_kills:
             return f"KIA {ts}, returned to action"
-        # Check for self-kill
         deaths = m.deaths_of(player.id)
         for d in deaths:
             if d.attacker_id == player.id:
@@ -113,6 +205,9 @@ class ReportBuilder:
                 f"{name} ({cnt})" for name, cnt in attacker_counts.most_common(4)
             )
 
+            # Determine terrain context for this phase
+            terrain_line = self._phase_terrain_summary(phase_kills)
+
             # Player casualties in this phase
             player_deaths = []
             for k in phase_kills:
@@ -121,11 +216,15 @@ class ReportBuilder:
                     att = m.get_entity(k.attacker_id)
                     att_name = att.name if att else "Unknown"
                     weapon = self._shorten_weapon(k.weapon)
+                    pos = self._kill_position(k)
+                    grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
+                    terrain_desc = self._describe_terrain(*pos) if pos else ""
+                    terrain_suffix = f" - {terrain_desc}" if terrain_desc else ""
                     if k.attacker_id == k.victim_id:
-                        player_deaths.append(f"** {victim.name} self-killed ({weapon})")
+                        player_deaths.append(f"** {victim.name} self-killed ({weapon}){grid}{terrain_suffix}")
                     else:
                         player_deaths.append(
-                            f"** {victim.name} KIA by {att_name} ({weapon}, {k.distance}m)"
+                            f"** {victim.name} KIA by {att_name} ({weapon}, {k.distance}m){grid}{terrain_suffix}"
                         )
 
             intensity = self._intensity_label(len(phase_kills))
@@ -133,10 +232,34 @@ class ReportBuilder:
                 f"  Phase {i+1} ({self._frame_to_timestamp(start)}-{self._frame_to_timestamp(end)}): "
                 f"{len(phase_kills)} kills - {intensity}. {top_attackers}"
             )
+            if terrain_line:
+                lines.append(f"    {terrain_line}")
             for pd in player_deaths:
                 lines.append(f"    {pd}")
 
         return "\n".join(lines)
+
+    def _phase_terrain_summary(self, phase_kills: list) -> str:
+        """Summarize the terrain types where kills occurred in a phase."""
+        if not self._terrain_tiles:
+            return ""
+        terrain_counts: Counter[str] = Counter()
+        grids: set[str] = set()
+        for k in phase_kills:
+            pos = self._kill_position(k)
+            if not pos:
+                continue
+            grids.add(self._coords_to_grid(*pos))
+            tile = self._get_terrain_at(*pos)
+            if tile and not tile.get("parse_error"):
+                terrain_counts[tile.get("terrain_type", "unknown")] += 1
+
+        if not terrain_counts:
+            return ""
+        dominant = terrain_counts.most_common(1)[0][0]
+        grid_list = sorted(grids)
+        grid_range = f"{grid_list[0]}-{grid_list[-1]}" if len(grid_list) > 1 else grid_list[0]
+        return f"Terrain: engagements in {dominant} terrain near grids {grid_range}"
 
     def _notable_engagements(self) -> str:
         m = self.mission
@@ -148,9 +271,14 @@ class ReportBuilder:
         for k in longest:
             att = m.get_entity(k.attacker_id)
             vic = m.get_entity(k.victim_id)
+            pos = self._kill_position(k)
+            grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
+            terrain_desc = self._describe_terrain(*pos) if pos else ""
+            terrain_suffix = f", {terrain_desc}" if terrain_desc else ""
             lines.append(
                 f"  {att.name if att else '?'} killed {vic.name if vic else '?'} "
-                f"at {k.distance}m ({self._shorten_weapon(k.weapon)}) [{self._frame_to_timestamp(k.frame)}]"
+                f"at {k.distance}m ({self._shorten_weapon(k.weapon)}) "
+                f"[{self._frame_to_timestamp(k.frame)}]{grid}{terrain_suffix}"
             )
 
         # Vehicle kills
@@ -163,9 +291,12 @@ class ReportBuilder:
             for k in vehicle_kills:
                 att = m.get_entity(k.attacker_id)
                 vic = m.get_entity(k.victim_id)
+                pos = self._kill_position(k)
+                grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
                 lines.append(
                     f"    {att.name if att else '?'} destroyed {vic.name if vic else '?'} "
-                    f"({self._shorten_weapon(k.weapon)}, {k.distance}m) [{self._frame_to_timestamp(k.frame)}]"
+                    f"({self._shorten_weapon(k.weapon)}, {k.distance}m) "
+                    f"[{self._frame_to_timestamp(k.frame)}]{grid}"
                 )
 
         return "\n".join(lines)
@@ -205,7 +336,6 @@ class ReportBuilder:
         m = self.mission
         player_ids = {p.id for p in m.players}
 
-        # Count player kills on OPFOR
         blufor_kills = len([k for k in m.kills if k.attacker_id in player_ids and k.victim_id not in player_ids])
         player_deaths = len([k for k in m.kills if k.victim_id in player_ids])
         survived = len([p for p in m.players if p.death_frame is None])
@@ -231,17 +361,13 @@ class ReportBuilder:
     def _shorten_weapon(weapon: str) -> str:
         if not weapon:
             return "unknown"
-        # Remove leading [XXX] prefix (e.g., "[121] Seekins..." or "[GOLD] m4a1...")
         text = weapon
         if text.startswith("[") and "] " in text:
             text = text.split("] ", 1)[1]
-        # Strip parenthetical details
         base = text.split("(")[0].strip()
-        # Extract final [caliber] from original text
         cal = ""
         if "[" in text:
             cal = text[text.rfind("["):]
-        # Avoid duplicating caliber if base already ends with it
         if cal and not base.endswith(cal):
             return f"{base} {cal}"
         return base if base else weapon

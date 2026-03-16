@@ -29,6 +29,7 @@ coverage.xml
 *.pem
 *.secret
 credentials*
+AAR_Template/*
 
 # Claude Code (local settings, plans, memory)
 .claude/

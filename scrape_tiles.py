@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import signal
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
 
 BASE_URL = "https://jetelain.github.io/Arma3Map"
 OUTPUT_DIR = Path(__file__).parent / "map_tiles"
-REQUEST_DELAY = 0.1
-CONFIG_DELAY = 0.5
 TIMEOUT = 15
+DEFAULT_WORKERS = 8
 
 MAP_NAMES = [
     "abramia", "altis", "beketov", "blud_vidda", "cam_lao_nam",
@@ -33,19 +36,30 @@ MAP_NAMES = [
     "uzbin", "vt5", "vt7", "wl_rosche", "woodland_acr", "zargabad",
 ]
 
+# Global shutdown event for graceful Ctrl+C
+_shutdown = threading.Event()
+
+# Thread-local storage for per-thread requests sessions
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    """Get or create a thread-local requests session."""
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = requests.Session()
+        _thread_local.session.headers["User-Agent"] = "Arma3MissionReport-TileScraper/2.0"
+    return _thread_local.session
+
 
 def parse_map_config(js_text: str, map_name: str) -> dict:
     """Parse a non-standard JS config file into a Python dict."""
     text = js_text.strip()
-    # Strip BOM
     if text.startswith("\ufeff"):
         text = text[1:]
 
-    # Remove wrapper: Arma3Map.Maps.xxx = { ... };
     text = re.sub(r"^Arma3Map\.Maps\.\w+\s*=\s*\{", "{", text)
     text = re.sub(r"\}\s*;\s*$", "}", text)
 
-    # Extract CRS line: CRS: MGRS_CRS(a, b, c)
     crs_data = {}
     crs_match = re.search(r"MGRS_CRS\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*(\d+)\s*\)", text)
     if crs_match:
@@ -54,43 +68,33 @@ def parse_map_config(js_text: str, map_name: str) -> dict:
             "scaleY": float(crs_match.group(2)),
             "offset": int(crs_match.group(3)),
         }
-    # Remove the CRS line entirely
     text = re.sub(r"\"?CRS\"?\s*:\s*MGRS_CRS\([^)]*\)\s*,?", "", text)
 
-    # Quote bare JS keys: word: -> "word":
     text = re.sub(r"(?m)(?<=[\{,\n])\s*(\w+)\s*:", r' "\1":', text)
-
-    # Convert single-quoted strings to double-quoted
-    # Match 'value' that's not inside double quotes already
     text = re.sub(r"'([^']*)'", r'"\1"', text)
-
-    # Remove trailing commas before } or ]
     text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    # Clean up any double-comma or empty entries
     text = re.sub(r",\s*,", ",", text)
 
     try:
         config = json.loads(text)
     except json.JSONDecodeError as e:
         print(f"  WARNING: Failed to parse config for {map_name}: {e}")
-        print(f"  Preprocessed text (first 500 chars): {text[:500]}")
         return {}
 
     config["CRS"] = crs_data
     return config
 
 
-def download_config(session: requests.Session, map_name: str, output_dir: Path) -> dict | None:
+def download_config(map_name: str, output_dir: Path) -> dict | None:
     """Download and parse a map's JS config, saving as config.json."""
     map_dir = output_dir / map_name
     config_path = map_dir / "config.json"
 
-    # Resume: if config already exists, load it
     if config_path.exists():
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    session = _get_session()
     url = f"{BASE_URL}/maps/{map_name}.js"
     try:
         resp = session.get(url, timeout=TIMEOUT)
@@ -113,57 +117,82 @@ def download_config(session: requests.Session, map_name: str, output_dir: Path) 
     return config
 
 
+def _download_single_tile(map_name: str, z: int, x: int, y: int, output_dir: Path) -> str:
+    """Download a single tile. Returns 'downloaded', 'skipped', or 'failed'."""
+    if _shutdown.is_set():
+        return "failed"
+
+    tile_path = output_dir / map_name / str(z) / str(x) / f"{y}.png"
+
+    if tile_path.exists() and tile_path.stat().st_size > 0:
+        return "skipped"
+
+    session = _get_session()
+    url = f"{BASE_URL}/maps/{map_name}/{z}/{x}/{y}.png"
+    try:
+        resp = session.get(url, timeout=TIMEOUT)
+        if resp.status_code == 200:
+            tile_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = tile_path.with_suffix(".png.tmp")
+            tmp_path.write_bytes(resp.content)
+            os.replace(str(tmp_path), str(tile_path))
+            return "downloaded"
+        elif resp.status_code == 404:
+            return "failed"
+        else:
+            return "failed"
+    except requests.RequestException:
+        return "failed"
+
+
 def download_tiles(
-    session: requests.Session, map_name: str, config: dict, output_dir: Path, delay: float
+    map_name: str, config: dict, output_dir: Path, workers: int
 ) -> tuple[int, int, int]:
-    """Download all tiles for a map. Returns (downloaded, skipped, failed)."""
+    """Download all tiles for a map using a thread pool. Returns (downloaded, skipped, failed)."""
     max_zoom = config.get("maxZoom", 5)
+    total_expected = calc_total_tiles(max_zoom)
+
+    # Build list of all tile coordinates
+    tasks = []
+    for z in range(0, max_zoom + 1):
+        grid_size = 2**z
+        for x in range(grid_size):
+            for y in range(grid_size):
+                tasks.append((z, x, y))
+
     downloaded = 0
     skipped = 0
     failed = 0
+    lock = threading.Lock()
 
-    for z in range(0, max_zoom + 1):
-        grid_size = 2**z
-        total_tiles = grid_size * grid_size
-        z_downloaded = 0
-        z_skipped = 0
-        z_failed = 0
+    def update_and_report(result: str):
+        nonlocal downloaded, skipped, failed
+        with lock:
+            if result == "downloaded":
+                downloaded += 1
+            elif result == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+            done = downloaded + skipped + failed
+            print(f"\r  {done}/{total_expected} tiles ({downloaded} new, {skipped} cached, {failed} failed)", end="", flush=True)
 
-        for x in range(grid_size):
-            for y in range(grid_size):
-                tile_path = output_dir / map_name / str(z) / str(x) / f"{y}.png"
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_download_single_tile, map_name, z, x, y, output_dir): (z, x, y)
+            for z, x, y in tasks
+        }
+        try:
+            for future in as_completed(futures):
+                if _shutdown.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                update_and_report(future.result())
+        except KeyboardInterrupt:
+            _shutdown.set()
+            executor.shutdown(wait=False, cancel_futures=True)
 
-                if tile_path.exists() and tile_path.stat().st_size > 0:
-                    z_skipped += 1
-                    continue
-
-                url = f"{BASE_URL}/maps/{map_name}/{z}/{x}/{y}.png"
-                try:
-                    resp = session.get(url, timeout=TIMEOUT)
-                    if resp.status_code == 200:
-                        tile_path.parent.mkdir(parents=True, exist_ok=True)
-                        tile_path.write_bytes(resp.content)
-                        z_downloaded += 1
-                    elif resp.status_code == 404:
-                        z_failed += 1
-                    else:
-                        print(f"  HTTP {resp.status_code} for {url}")
-                        z_failed += 1
-                except requests.RequestException as e:
-                    print(f"  ERROR: {e}")
-                    z_failed += 1
-
-                time.sleep(delay)
-
-                # Progress update
-                done = z_downloaded + z_skipped + z_failed
-                print(f"\r  zoom {z}: {done}/{total_tiles}", end="", flush=True)
-
-        downloaded += z_downloaded
-        skipped += z_skipped
-        failed += z_failed
-        print(f"\r  zoom {z}: {total_tiles} tiles ({z_downloaded} new, {z_skipped} cached, {z_failed} failed)")
-
+    print()  # newline after \r progress
     return downloaded, skipped, failed
 
 
@@ -171,28 +200,108 @@ def calc_total_tiles(max_zoom: int) -> int:
     return sum(4**z for z in range(max_zoom + 1))
 
 
+def verify_maps(output_dir: Path, map_filter: str | None = None) -> bool:
+    """Verify completeness of downloaded tiles. Returns True if all complete."""
+    all_ok = True
+    maps_checked = 0
+
+    for map_dir in sorted(output_dir.iterdir()):
+        if not map_dir.is_dir():
+            continue
+        config_path = map_dir / "config.json"
+        if not config_path.exists():
+            continue
+
+        map_name = map_dir.name
+        if map_filter and map_name != map_filter:
+            continue
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        max_zoom = config.get("maxZoom", 5)
+        expected = calc_total_tiles(max_zoom)
+        present = 0
+        empty = 0
+        missing_examples = []
+
+        for z in range(0, max_zoom + 1):
+            grid_size = 2**z
+            for x in range(grid_size):
+                for y in range(grid_size):
+                    tile_path = map_dir / str(z) / str(x) / f"{y}.png"
+                    if tile_path.exists():
+                        if tile_path.stat().st_size > 0:
+                            present += 1
+                        else:
+                            empty += 1
+                            if len(missing_examples) < 3:
+                                missing_examples.append(f"{z}/{x}/{y}.png (empty)")
+                    else:
+                        if len(missing_examples) < 3:
+                            missing_examples.append(f"{z}/{x}/{y}.png")
+
+        missing = expected - present
+        maps_checked += 1
+
+        if missing == 0 and empty == 0:
+            print(f"  {map_name}: {present}/{expected} tiles OK")
+        else:
+            all_ok = False
+            parts = []
+            if missing > 0:
+                parts.append(f"{missing} missing")
+            if empty > 0:
+                parts.append(f"{empty} empty")
+            print(f"  {map_name}: {present}/{expected} tiles ({', '.join(parts)})")
+            for ex in missing_examples:
+                print(f"    - {ex}")
+
+    if maps_checked == 0:
+        print("  No maps found to verify.")
+        return False
+
+    print(f"\n  Checked {maps_checked} maps: {'ALL COMPLETE' if all_ok else 'SOME INCOMPLETE'}")
+    return all_ok
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download Arma 3 map tiles from Arma3Map")
     parser.add_argument("--map", type=str, help="Download only this map")
     parser.add_argument("--dry-run", action="store_true", help="Download configs only, skip tiles")
-    parser.add_argument("--delay", type=float, default=REQUEST_DELAY, help="Delay between tile requests (seconds)")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel download threads (default: 8)")
+    parser.add_argument("--verify", action="store_true", help="Verify tile completeness, no downloads")
     parser.add_argument("--output", type=str, default=str(OUTPUT_DIR), help="Output directory")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
+
+    if args.verify:
+        print("Verifying tile completeness...")
+        ok = verify_maps(output_dir, args.map)
+        sys.exit(0 if ok else 1)
+
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Handle Ctrl+C gracefully
+    def signal_handler(sig, frame):
+        print("\n\nInterrupted! Finishing current downloads...")
+        _shutdown.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
 
     maps_to_download = [args.map] if args.map else MAP_NAMES
     total_maps = len(maps_to_download)
-
-    session = requests.Session()
-    session.headers["User-Agent"] = "Arma3MissionReport-TileScraper/1.0"
 
     totals = {"downloaded": 0, "skipped": 0, "failed": 0, "config_errors": 0}
     start_time = time.time()
 
     for i, map_name in enumerate(maps_to_download, 1):
-        config = download_config(session, map_name, output_dir)
+        if _shutdown.is_set():
+            print("Shutdown requested, stopping.")
+            break
+
+        config = download_config(map_name, output_dir)
         if config is None:
             totals["config_errors"] += 1
             print(f"[{i}/{total_maps}] {map_name} — SKIPPED (no config)")
@@ -206,9 +315,7 @@ def main():
         if args.dry_run:
             continue
 
-        time.sleep(CONFIG_DELAY)
-
-        dl, sk, fl = download_tiles(session, map_name, config, output_dir, args.delay)
+        dl, sk, fl = download_tiles(map_name, config, output_dir, args.workers)
         totals["downloaded"] += dl
         totals["skipped"] += sk
         totals["failed"] += fl

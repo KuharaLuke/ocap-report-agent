@@ -1,5 +1,6 @@
 """Generate a combat after-action report from OCAP2 mission data via local LLM."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -33,16 +34,26 @@ def main() -> None:
     mission = MissionLoader.load(data_path)
     print(f"  {len(mission.entities)} entities, {len(mission.kills)} kills, {len(mission.hits)} hits")
 
-    # 2. Build briefing
+    # 2. Load terrain data (optional)
+    terrain_data = None
+    terrain_path = Path("map_tiles") / mission.world_name / "terrain_analysis.json"
+    if terrain_path.exists():
+        with open(terrain_path, "r", encoding="utf-8") as f:
+            terrain_data = json.load(f)
+        print(f"  Terrain data loaded from {terrain_path}")
+    else:
+        print(f"  No terrain data for {mission.world_name} (run tile_analyzer.py to generate)")
+
+    # 3. Build briefing
     print("Building mission briefing ...")
-    builder = ReportBuilder(mission)
+    builder = ReportBuilder(mission, terrain_data=terrain_data)
     briefing = builder.build()
 
     briefing_path = output_dir / "briefing.txt"
     briefing_path.write_text(briefing, encoding="utf-8")
     print(f"  Briefing saved to {briefing_path} ({len(briefing)} chars)")
 
-    # 3. Generate report via LLM
+    # 4. Generate report via LLM
     print(f"Sending to LLM at {llm_url} ...")
     generator = ReportGenerator(base_url=llm_url)
     try:
@@ -51,7 +62,7 @@ def main() -> None:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 4. Save report
+    # 5. Save report
     report_path = output_dir / "combat_report.md"
     report_path.write_text(report, encoding="utf-8")
     print(f"  Report saved to {report_path}")
