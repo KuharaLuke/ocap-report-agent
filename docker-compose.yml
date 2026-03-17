@@ -5,8 +5,12 @@ services:
       - LLM_URL=http://host.docker.internal:1234
       - DATA_FILE=/app/data/mission.json.gz
       - OUTPUT_DIR=/app/output
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID:-}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-}
     volumes:
       - ./2026_03_08__21_33_RandomPatrolGenerator.json.gz:/app/data/mission.json.gz:ro
       - ./test_output:/app/output
+      - ./map_tiles:/app/map_tiles:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

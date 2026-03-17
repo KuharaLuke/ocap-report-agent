@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import re
-
-import requests
+from llm_client import LLMClient
 
 
 class ReportGenerator:
@@ -12,15 +10,29 @@ class ReportGenerator:
 
     SYSTEM_PROMPT = (
         "You are a military intelligence officer for Task Force 405, SWTG - F Squadron. "
-        "Write an After Action Report following this exact structure:\n\n"
+        "Write an After Action Report that STRICTLY follows the TF405 AAR template format.\n\n"
+        "The report MUST begin with this exact header block (fill in the bracketed fields "
+        "from the briefing data):\n\n"
+        "TASK FORCE 405\n"
+        "TASK FORCE 405 - SWTG - F SQUADRON\n"
+        "OPERATION [operation name derived from mission name] - AFTER ACTION REPORT\n"
+        "[Location / Map name]\n"
+        "[Date]\n"
+        "MEMORANDUM FOR\n\n"
+        "TO:                CENTCOM\n"
+        "FROM:              OIC, F SQUADRON\n"
+        "SUBJECT:           After Action Report [Operation Name]\n"
+        "REF:               NIL\n\n"
+        "Then write the following 8 numbered sections:\n\n"
         "1. GENERAL INFORMATION / INTRODUCTION\n"
         "   Describe the commander's mission and intent.\n\n"
         "2. SUMMARY\n"
-        "   * Deployed Location\n"
-        "   * Deployed Personnel (list names and ranks)\n"
-        "   * Duration of Deployment\n"
-        "   * Contingency Purpose\n"
-        "   * Scope of Operation\n\n"
+        "   The following is information regarding the contingency itself:\n"
+        "   * Deployed Location: [location]\n"
+        "   * Deployed Personnel: [list names and roles]\n"
+        "   * Duration of Deployment: [start to end]\n"
+        "   * Contingency Purpose: In support of [purpose]\n"
+        "   * Scope of Operation: [scope]\n\n"
         "3. NARRATIVE SUMMARY OF EXECUTION\n"
         "   Chronological timeline of all key actions from mission start to end. "
         "Include insertion, movement, enemy contact, and extraction. "
@@ -38,101 +50,76 @@ class ReportGenerator:
         "   EQUIPMENT: Observed enemy weaponry, vehicles, equipment.\n"
         "   CASUALTIES: Confirmed enemy KIA.\n\n"
         "6. INTELLIGENCE ASSESSMENT\n"
-        "   N/A - No pre-mission intelligence data available.\n\n"
+        "   Accuracy of Pre-Mission Intelligence: [If pre-mission planning context was "
+        "provided, assess how accurately it predicted actual enemy disposition and "
+        "operational conditions. If no pre-mission intel was provided, state N/A.]\n"
+        "   New Intelligence Gathered During The Operation: [any new intel from "
+        "the operation, e.g. enemy locations, composition, patterns]\n\n"
         "7. ANALYSIS AND RECOMMENDATIONS\n"
         "   SUSTAINMENT: Successful tactics, techniques, and procedures.\n"
         "   IMPROVEMENT: Challenges and actionable recommendations. "
         "Reference terrain considerations for future operations in similar AOs.\n\n"
         "8. CONCLUSION\n"
         "   Mission outcome summary.\n\n"
-        "Write in formal military prose, third person. "
-        "Use military time references. Use grid references when describing locations. "
-        "Do not invent facts not present in the briefing data. "
-        "Keep the total report under 1000 words. "
-        "CRITICAL: Output ONLY the finished report as a polished document. "
-        "Do NOT output outlines, bullet points, planning notes, drafts, or reasoning steps. "
-        "Write complete prose paragraphs for each section. "
-        "Start your response with: TASK FORCE 405"
+        "End the report with a signature block:\n"
+        "[Blank line]\n"
+        "[Commander name or 'OIC, F SQUADRON']\n"
+        "[COMMANDER NAME IN ALL CAPS]\n"
+        "[Rank, Title]\n\n"
+        "CRITICAL FORMATTING RULES:\n"
+        "- Follow the template structure EXACTLY. Do not skip or reorder sections.\n"
+        "- The header block (TF405 lines, OPERATION line, location, date, MEMORANDUM, "
+        "TO/FROM/SUBJECT/REF) is MANDATORY.\n"
+        "- The signature block at the end is MANDATORY.\n"
+        "- Write in formal military prose, third person.\n"
+        "- Use military time references. Use grid references when describing locations.\n"
+        "- Do not invent facts not present in the briefing data.\n"
+        "- Keep the total report under 1000 words.\n"
+        "- Output ONLY the finished report. No outlines, planning notes, drafts, or reasoning.\n"
+        "- Write complete prose paragraphs for each section.\n"
+        "- Start your response with: TASK FORCE 405"
     )
 
     def __init__(self, base_url: str = "http://127.0.0.1:1234") -> None:
-        self.url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        self._client = LLMClient(base_url)
 
-    def generate(self, briefing: str, temperature: float = 0.4) -> str:
+    ASSISTANT_PREFILL = "TASK FORCE 405\nTASK FORCE 405 - SWTG - F SQUADRON\nOPERATION "
+
+    def generate(
+        self,
+        briefing: str,
+        discord_context: str | None = None,
+        temperature: float = 0.4,
+    ) -> str:
         """Send briefing to the LLM and return the generated report text."""
-        messages = self._build_messages(briefing)
-        payload = {
-            "model": "qwen/qwen3.5-9b",
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": 8192,
-            "stream": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
+        messages = self._build_messages(briefing, discord_context)
+        result = self._client.chat(messages, temperature=temperature)
+        # The LLM response continues after the prefill, so prepend it
+        # to reconstruct the full report with the header block
+        return self.ASSISTANT_PREFILL + result
 
-        try:
-            resp = requests.post(self.url, json=payload, timeout=180)
-            resp.raise_for_status()
-        except requests.ConnectionError:
-            raise ConnectionError(
-                f"Cannot connect to LM Studio at {self.url}. "
-                "Ensure LM Studio is running with a model loaded."
+    def _build_messages(
+        self, briefing: str, discord_context: str | None = None
+    ) -> list[dict]:
+        user_content = (
+            "Generate a complete After Action Report in formal prose from "
+            "the following mission briefing data. Write the full document, "
+            "not an outline.\n\n" + briefing
+        )
+        if discord_context:
+            user_content += (
+                "\n\n=== ADDITIONAL CONTEXT: PRE-MISSION PLANNING ===\n"
+                "The following intelligence was extracted from the unit's "
+                "pre-mission planning discussion. Use it to inform sections "
+                "1 (Introduction), 2 (Summary), 6 (Intelligence Assessment), "
+                "7 (Analysis), and 8 (Conclusion):\n\n"
+                + discord_context
             )
-        except requests.Timeout:
-            raise TimeoutError("LLM request timed out after 180 seconds.")
-        except requests.HTTPError:
-            raise RuntimeError(f"LLM API error: {resp.status_code} - {resp.text}")
-
-        data = resp.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError):
-            raise RuntimeError(f"Unexpected API response format: {data}")
-        return self._strip_thinking(content)
-
-    @staticmethod
-    def _strip_thinking(text: str) -> str:
-        """Remove reasoning/thinking traces from models like Qwen that emit CoT."""
-        # Strip <think>...</think> blocks
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-        # Detect and strip untagged CoT (numbered analysis steps before the report)
-        # Look for report markers that signal the actual AAR content
-        report_markers = [
-            "TASK FORCE 405",
-            "**AFTER ACTION",
-            "# AFTER ACTION",
-            "## AFTER ACTION",
-            "**1. GENERAL INFORMATION",
-            "# 1. GENERAL INFORMATION",
-            "## 1. GENERAL INFORMATION",
-            "1. GENERAL INFORMATION",
-            "**GENERAL INFORMATION",
-            "**EXECUTIVE SUMMARY",
-            "**1. EXECUTIVE SUMMARY",
-            "# EXECUTIVE SUMMARY",
-            "EXECUTIVE SUMMARY",
-        ]
-        for marker in report_markers:
-            idx = text.find(marker)
-            if idx > 0:
-                return text[idx:].strip()
-
-        return text.strip()
-
-    def _build_messages(self, briefing: str) -> list[dict]:
         return [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Generate a complete After Action Report in formal prose from "
-                    "the following mission briefing data. Write the full document, "
-                    "not an outline.\n\n" + briefing
-                ),
-            },
+            {"role": "user", "content": user_content},
             {
                 "role": "assistant",
-                "content": "TASK FORCE 405\nTASK FORCE 405 - SWTG - F SQUADRON\n",
+                "content": self.ASSISTANT_PREFILL,
             },
         ]

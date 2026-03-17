@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 
 from models.entity import VehicleEntity
-from models.event import KillEvent
+from models.event import ConnectionEvent, KillEvent
 from models.mission import Mission
 
 
 class ReportBuilder:
     """Transforms parsed OCAP2 mission data into a structured briefing document.
 
-    The output is designed to fit within ~2000 tokens so that a small LLM
-    (e.g. Qwen 3.5 9B) can produce a coherent after-action report from it.
+    The output is designed to fit within the context window of a local LLM
+    (e.g. Qwen 3.5 9B @ 32K context) while maximising useful information.
     Follows the TF405 AAR template structure.
     """
 
-    NUM_PHASES = 5
-
-    def __init__(self, mission: Mission, terrain_data: dict | None = None) -> None:
+    def __init__(
+        self,
+        mission: Mission,
+        terrain_data: dict | None = None,
+        cities: list[dict] | None = None,
+        discord_context: str | None = None,
+    ) -> None:
         self.mission = mission
         self.terrain_data = terrain_data
         self._terrain_tiles = terrain_data.get("tiles", {}) if terrain_data else {}
@@ -29,11 +34,21 @@ class ReportBuilder:
             if terrain_data
             else None
         )
+        self._cities = cities or []
+        self._discord_context = discord_context
+        # Pre-compute disconnect frames for artifact detection
+        self._disconnect_frames = {
+            e.frame for e in mission.events
+            if isinstance(e, ConnectionEvent) and e.event_type == "disconnected"
+        }
+        # Pre-compute player IDs for reuse
+        self._player_ids = {p.id for p in mission.players}
 
     def build(self) -> str:
         sections = [
             self._mission_header(),
             self._terrain_overview(),
+            self._discord_intel(),
             self._player_roster(),
             self._timeline_phases(),
             self._notable_engagements(),
@@ -42,6 +57,40 @@ class ReportBuilder:
             self._casualty_summary(),
         ]
         return "\n\n".join(s for s in sections if s)
+
+    # ------------------------------------------------------------------
+    # Kill filtering
+    # ------------------------------------------------------------------
+
+    def _is_artifact(self, kill: KillEvent) -> bool:
+        """Detect OCAP2 non-combat kill artifacts that should be excluded.
+
+        Covers:
+        - Respawn/teleport: self-kill with empty weapon
+        - Disconnect: self-kill at same frame as a disconnect event
+        - Environmental/scripted: attacker_id=-1, empty weapon, distance=-1
+        """
+        weapon = kill.weapon.strip() if kill.weapon else ""
+        weapon_empty = weapon in ("", "[]")
+
+        # Self-kill checks
+        if kill.victim_id == kill.attacker_id:
+            if weapon_empty:
+                return True  # respawn/teleport artifact
+            # Check for disconnect at same frame
+            if kill.distance == 0 and kill.frame in self._disconnect_frames:
+                return True
+
+        # Unknown attacker with no weapon = environmental/scripted death
+        if kill.attacker_id == -1 and weapon_empty and kill.distance == -1:
+            return True
+
+        return False
+
+    @property
+    def _combat_kills(self) -> list[KillEvent]:
+        """All kills excluding non-combat artifacts."""
+        return [k for k in self.mission.kills if not self._is_artifact(k)]
 
     # ------------------------------------------------------------------
     # Terrain helpers
@@ -89,6 +138,25 @@ class ReportBuilder:
         if not pos:
             return None
         return (pos.x, pos.y)
+
+    def _nearest_city(self, x: float, y: float, max_distance: float = 2000.0) -> str:
+        """Return 'near CityName' if within max_distance, else empty string."""
+        best_name = ""
+        best_dist = max_distance
+        for city in self._cities:
+            dx = x - city["x"]
+            dy = y - city["y"]
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_name = city["name"]
+        return f"near {best_name}" if best_name else ""
+
+    def _grid_with_city(self, x: float, y: float) -> str:
+        """Return 'grid XXYY' with optional 'near CityName' suffix."""
+        grid = self._coords_to_grid(x, y)
+        city = self._nearest_city(x, y)
+        return f"grid {grid} {city}".rstrip() if city else f"grid {grid}"
 
     # ------------------------------------------------------------------
     # Section builders
@@ -145,48 +213,110 @@ class ReportBuilder:
 
         return "\n".join(parts)
 
+    def _discord_intel(self) -> str:
+        """Include Discord-sourced pre-mission intelligence if available."""
+        if not self._discord_context:
+            return ""
+        return f"PRE-MISSION INTELLIGENCE (from planning channel):\n{self._discord_context}"
+
+    def _merged_players(self) -> list[dict]:
+        """Merge duplicate player entities (reconnections) by name."""
+        m = self.mission
+        merged: dict[str, dict] = {}
+        for p in m.players:
+            if p.name not in merged:
+                merged[p.name] = {
+                    "name": p.name,
+                    "role": p.role,
+                    "ids": [p.id],
+                    "entity": p,
+                }
+            else:
+                merged[p.name]["ids"].append(p.id)
+                # Keep the role from the entity with more kills
+                if len(self._player_kills_by(p.id)) > len(self._player_kills_by(merged[p.name]["entity"].id)):
+                    merged[p.name]["role"] = p.role
+                    merged[p.name]["entity"] = p
+        return list(merged.values())
+
+    def _player_kills_by(self, entity_id: int) -> list[KillEvent]:
+        """Kills by an entity, excluding respawn artifacts."""
+        return [k for k in self.mission.kills_by(entity_id) if not self._is_artifact(k)]
+
+    def _player_deaths_of(self, entity_id: int) -> list[KillEvent]:
+        """Deaths of an entity, excluding respawn artifacts."""
+        return [k for k in self.mission.deaths_of(entity_id) if not self._is_artifact(k)]
+
     def _player_roster(self) -> str:
         m = self.mission
         lines = ["FRIENDLY FORCES:"]
-        for p in m.players:
-            kills = len(m.kills_by(p.id))
-            deaths = len(m.deaths_of(p.id))
-            acc = (
-                f"{p.total_shots and (len([h for h in m.hits if h.attacker_id == p.id]) / p.total_shots * 100):.0f}%"
-                if p.total_shots > 0
-                else "N/A"
+        for info in self._merged_players():
+            ids = info["ids"]
+            kills = sum(len(self._player_kills_by(eid)) for eid in ids)
+            deaths = sum(len(self._player_deaths_of(eid)) for eid in ids)
+            total_shots = sum(m.get_entity(eid).total_shots for eid in ids)
+            total_hits = sum(
+                len([h for h in m.hits if h.attacker_id == eid]) for eid in ids
             )
-            status = self._player_status(p)
+            if total_shots > 0:
+                acc = f"{total_hits / total_shots * 100:.0f}%"
+            elif total_hits > 0:
+                acc = f"{total_hits} hits"
+            else:
+                acc = "N/A"
+            status = self._merged_player_status(info)
             lines.append(
-                f"  {p.name:<22} | {p.role:<22} | {kills}K/{deaths}D | {acc} acc | {status}"
+                f"  {info['name']:<22} | {info['role']:<22} | {kills}K/{deaths}D | {acc} acc | {status}"
             )
         return "\n".join(lines)
 
-    def _player_status(self, player) -> str:
-        m = self.mission
-        death_frame = player.death_frame
-        if death_frame is None:
+    def _merged_player_status(self, info: dict) -> str:
+        """Determine status from filtered kill events, not position data."""
+        # Collect real (non-artifact) deaths across all entity IDs
+        all_deaths = []
+        for eid in info["ids"]:
+            all_deaths.extend(self._player_deaths_of(eid))
+
+        if not all_deaths:
             return "Survived"
-        ts = self._frame_to_timestamp(death_frame)
-        later_kills = [k for k in m.kills_by(player.id) if k.frame > death_frame]
-        if later_kills:
+
+        # Sort by frame to find earliest real death
+        all_deaths.sort(key=lambda k: k.frame)
+        first = all_deaths[0]
+        ts = self._frame_to_timestamp(first.frame)
+
+        # Check if they continued fighting after their first real death
+        all_kills = []
+        for eid in info["ids"]:
+            all_kills.extend(self._player_kills_by(eid))
+        later_kills = [k for k in all_kills if k.frame > first.frame]
+
+        if later_kills or len(all_deaths) > 1:
             return f"KIA {ts}, returned to action"
-        deaths = m.deaths_of(player.id)
-        for d in deaths:
-            if d.attacker_id == player.id:
-                return f"KIA {ts} (self-inflicted)"
         return f"KIA {ts}"
+
+    # ------------------------------------------------------------------
+    # Adaptive timeline
+    # ------------------------------------------------------------------
+
+    @property
+    def _num_phases(self) -> int:
+        """Adaptive phase count: ~10 minutes per phase, clamped to [3, 12]."""
+        duration_minutes = self.mission.duration_seconds / 60
+        return max(3, min(12, round(duration_minutes / 10)))
 
     def _timeline_phases(self) -> str:
         m = self.mission
-        phase_size = max(1, m.end_frame // self.NUM_PHASES)
-        kills = m.kills
+        num_phases = self._num_phases
+        phase_size = max(1, m.end_frame // num_phases)
+        kills = self._combat_kills
         lines = ["TIMELINE:"]
 
-        for i in range(self.NUM_PHASES):
+        for i in range(num_phases):
             start = i * phase_size
-            end = (i + 1) * phase_size if i < self.NUM_PHASES - 1 else m.end_frame
+            end = (i + 1) * phase_size if i < num_phases - 1 else m.end_frame
             phase_kills = [k for k in kills if start <= k.frame < end]
+
             if not phase_kills:
                 lines.append(
                     f"  Phase {i+1} ({self._frame_to_timestamp(start)}-{self._frame_to_timestamp(end)}): "
@@ -217,7 +347,7 @@ class ReportBuilder:
                     att_name = att.name if att else "Unknown"
                     weapon = self._shorten_weapon(k.weapon)
                     pos = self._kill_position(k)
-                    grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
+                    grid = f" at {self._grid_with_city(*pos)}" if pos else ""
                     terrain_desc = self._describe_terrain(*pos) if pos else ""
                     terrain_suffix = f" - {terrain_desc}" if terrain_desc else ""
                     if k.attacker_id == k.victim_id:
@@ -227,6 +357,9 @@ class ReportBuilder:
                             f"** {victim.name} KIA by {att_name} ({weapon}, {k.distance}m){grid}{terrain_suffix}"
                         )
 
+            # Movement summary for this phase
+            movement = self._phase_movement_summary(start, end)
+
             intensity = self._intensity_label(len(phase_kills))
             lines.append(
                 f"  Phase {i+1} ({self._frame_to_timestamp(start)}-{self._frame_to_timestamp(end)}): "
@@ -234,6 +367,8 @@ class ReportBuilder:
             )
             if terrain_line:
                 lines.append(f"    {terrain_line}")
+            if movement:
+                lines.append(f"    {movement}")
             for pd in player_deaths:
                 lines.append(f"    {pd}")
 
@@ -261,18 +396,50 @@ class ReportBuilder:
         grid_range = f"{grid_list[0]}-{grid_list[-1]}" if len(grid_list) > 1 else grid_list[0]
         return f"Terrain: engagements in {dominant} terrain near grids {grid_range}"
 
+    def _phase_movement_summary(self, start_frame: int, end_frame: int) -> str:
+        """Describe player force movement during a phase."""
+        # Group players by element designation (from role prefix)
+        elements: dict[str, list] = {}
+        for info in self._merged_players():
+            entity = info["entity"]
+            role = info["role"] or ""
+            # Extract element designation: "1-1 Squad Leader" -> "1-1"
+            prefix = role.split()[0] if role else "HQ"
+            elements.setdefault(prefix, []).append(entity)
+
+        movements = []
+        for element_name, entities in elements.items():
+            for entity in entities:
+                start_pos = entity.position_at(start_frame)
+                end_pos = entity.position_at(end_frame)
+                if start_pos and end_pos:
+                    start_grid = self._coords_to_grid(start_pos.x, start_pos.y)
+                    end_grid = self._coords_to_grid(end_pos.x, end_pos.y)
+                    if start_grid != end_grid:
+                        direction = self._bearing_label(
+                            start_pos.x, start_pos.y, end_pos.x, end_pos.y
+                        )
+                        movements.append(
+                            f"{element_name}: {direction} from {self._grid_with_city(start_pos.x, start_pos.y)}"
+                            f" to {self._grid_with_city(end_pos.x, end_pos.y)}"
+                        )
+                    break  # one entity per element is enough
+        if not movements:
+            return ""
+        return "Movement: " + "; ".join(movements)
+
     def _notable_engagements(self) -> str:
         m = self.mission
         lines = ["NOTABLE ENGAGEMENTS:"]
 
         # Top 3 longest kills
-        valid_kills = [k for k in m.kills if k.distance > 0]
+        valid_kills = [k for k in self._combat_kills if k.distance > 0]
         longest = sorted(valid_kills, key=lambda k: k.distance, reverse=True)[:3]
         for k in longest:
             att = m.get_entity(k.attacker_id)
             vic = m.get_entity(k.victim_id)
             pos = self._kill_position(k)
-            grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
+            grid = f" at {self._grid_with_city(*pos)}" if pos else ""
             terrain_desc = self._describe_terrain(*pos) if pos else ""
             terrain_suffix = f", {terrain_desc}" if terrain_desc else ""
             lines.append(
@@ -283,7 +450,7 @@ class ReportBuilder:
 
         # Vehicle kills
         vehicle_kills = [
-            k for k in m.kills
+            k for k in self._combat_kills
             if isinstance(m.get_entity(k.victim_id), VehicleEntity)
         ]
         if vehicle_kills:
@@ -292,7 +459,7 @@ class ReportBuilder:
                 att = m.get_entity(k.attacker_id)
                 vic = m.get_entity(k.victim_id)
                 pos = self._kill_position(k)
-                grid = f" at grid {self._coords_to_grid(*pos)}" if pos else ""
+                grid = f" at {self._grid_with_city(*pos)}" if pos else ""
                 lines.append(
                     f"    {att.name if att else '?'} destroyed {vic.name if vic else '?'} "
                     f"({self._shorten_weapon(k.weapon)}, {k.distance}m) "
@@ -309,42 +476,110 @@ class ReportBuilder:
                 prefix = e.group.split(" ")[0] if e.group else "Ungrouped"
                 group_counts[prefix] += 1
 
+        # Enemy weapon types from kill events where attacker is non-player
+        enemy_weapons: Counter[str] = Counter()
+        for k in self._combat_kills:
+            if k.attacker_id not in self._player_ids and k.attacker_id != -1:
+                weapon = self._shorten_weapon(k.weapon)
+                if weapon and weapon != "unknown":
+                    enemy_weapons[weapon] += 1
+
         lines = ["ENEMY FORCES:"]
         total = sum(group_counts.values())
         top = group_counts.most_common(5)
         for group, count in top:
             lines.append(f"  {group}: {count} personnel")
         lines.append(f"  Total non-player infantry: {total}")
+
+        if enemy_weapons:
+            lines.append("  Observed enemy weapons:")
+            for weapon, count in enemy_weapons.most_common(8):
+                lines.append(f"    {weapon}: {count} kills")
+
         return "\n".join(lines)
 
     def _vehicle_assets(self) -> str:
         m = self.mission
-        class_counts: Counter[str] = Counter()
-        vehicle_names: dict[str, list[str]] = {}
+        player_groups = {
+            p.group.split(" ")[0] for p in m.players if p.group
+        }
+
+        friendly_vehicles: Counter[str] = Counter()
+        friendly_names: dict[str, set] = {}
+        enemy_vehicles: Counter[str] = Counter()
+        enemy_names: dict[str, set] = {}
+        unclassified_vehicles: Counter[str] = Counter()
+        unclassified_names: dict[str, set] = {}
+
         for e in m.entities.values():
-            if isinstance(e, VehicleEntity):
-                class_counts[e.vehicle_class] += 1
-                vehicle_names.setdefault(e.vehicle_class, []).append(e.name)
+            if not isinstance(e, VehicleEntity):
+                continue
+            veh_prefix = e.group.split(" ")[0] if e.group else ""
+            if not veh_prefix:
+                target_counter = unclassified_vehicles
+                target_names = unclassified_names
+            elif veh_prefix in player_groups:
+                target_counter = friendly_vehicles
+                target_names = friendly_names
+            else:
+                target_counter = enemy_vehicles
+                target_names = enemy_names
+            target_counter[e.vehicle_class] += 1
+            target_names.setdefault(e.vehicle_class, set()).add(e.name)
 
         lines = ["VEHICLE ASSETS:"]
-        for cls, count in class_counts.most_common():
-            names = set(vehicle_names[cls])
-            lines.append(f"  {cls}: {count}x ({', '.join(sorted(names)[:5])})")
+        if friendly_vehicles:
+            lines.append("  FRIENDLY:")
+            for cls, count in friendly_vehicles.most_common():
+                names = sorted(friendly_names[cls])[:5]
+                lines.append(f"    {cls}: {count}x ({', '.join(names)})")
+        if enemy_vehicles:
+            lines.append("  ENEMY:")
+            for cls, count in enemy_vehicles.most_common():
+                names = sorted(enemy_names[cls])[:5]
+                lines.append(f"    {cls}: {count}x ({', '.join(names)})")
+        if unclassified_vehicles:
+            # If there are also classified vehicles, label this section;
+            # otherwise just list them flat (no misleading ENEMY label)
+            if friendly_vehicles or enemy_vehicles:
+                lines.append("  UNCLASSIFIED:")
+            for cls, count in unclassified_vehicles.most_common():
+                names = sorted(unclassified_names[cls])[:5]
+                prefix = "    " if friendly_vehicles or enemy_vehicles else "  "
+                lines.append(f"{prefix}{cls}: {count}x ({', '.join(names)})")
+        if not friendly_vehicles and not enemy_vehicles and not unclassified_vehicles:
+            lines.append("  No vehicles recorded")
         return "\n".join(lines)
 
     def _casualty_summary(self) -> str:
         m = self.mission
-        player_ids = {p.id for p in m.players}
+        combat = self._combat_kills
 
-        blufor_kills = len([k for k in m.kills if k.attacker_id in player_ids and k.victim_id not in player_ids])
-        player_deaths = len([k for k in m.kills if k.victim_id in player_ids])
-        survived = len([p for p in m.players if p.death_frame is None])
+        blufor_kills = len([k for k in combat if k.attacker_id in self._player_ids and k.victim_id not in self._player_ids])
+        player_deaths = len([k for k in combat if k.victim_id in self._player_ids])
+        # Count survivors based on filtered kill events, not position data
+        merged = self._merged_players()
+        kia_names = set()
+        for info in merged:
+            deaths = []
+            for eid in info["ids"]:
+                deaths.extend(self._player_deaths_of(eid))
+            if deaths:
+                # Check if they returned to action (kills after death)
+                all_kills_after = []
+                for eid in info["ids"]:
+                    for k in self._player_kills_by(eid):
+                        if any(k.frame > d.frame for d in deaths):
+                            all_kills_after.append(k)
+                if not all_kills_after and len(deaths) == 1:
+                    kia_names.add(info["name"])
+        survived = len(merged) - len(kia_names)
 
         return (
             "FINAL STATUS:\n"
             f"  BLUFOR: {survived} survived, {player_deaths} KIA events\n"
             f"  OPFOR: {blufor_kills} confirmed KIA by players\n"
-            f"  Total kills (all sources): {len(m.kills)}"
+            f"  Total kills (all sources): {len(combat)}"
         )
 
     # ------------------------------------------------------------------
@@ -382,3 +617,16 @@ class ReportBuilder:
             return "Moderate contact"
         else:
             return "Light contact"
+
+    @staticmethod
+    def _bearing_label(x1: float, y1: float, x2: float, y2: float) -> str:
+        """Convert a movement vector to a compass direction label."""
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) < 50 and abs(dy) < 50:
+            return "held position"
+        # Arma coordinate system: x = east, y = north
+        angle = math.degrees(math.atan2(dx, dy)) % 360
+        directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        idx = round(angle / 45) % 8
+        return f"moved {directions[idx]}"

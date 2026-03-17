@@ -6,7 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY models/ models/
-COPY loader.py report_builder.py report_generator.py report.py ./
+COPY AAR_Template/header_banner.png AAR_Template/header_banner.png
+COPY loader.py report_builder.py report_generator.py report.py llm_client.py discord_agent.py docx_converter.py ./
 
 RUN mkdir -p /app/output
 
