@@ -1,24 +1,24 @@
 # OCAP Report Agent
 
-Generates After Action Reports from Arma 3 OCAP2 mission replay data using local LLMs. Follows the Task Force 405 AAR template with optional terrain-aware narratives powered by Vision Language Models.
+Generates After Action Reports from Arma 3 OCAP2 mission replay data using local LLMs, with optional terrain-aware narratives powered by Vision Language Models.
 
 ## Features
 
 - **Mission Replay Parsing** - Loads OCAP2 `.json.gz` replay files and extracts entities, events, positions, and timeline data
 - **LLM-Powered AAR Generation** - Sends structured briefings to a local LLM (via OpenAI-compatible API) to produce formal military After Action Reports
-- **TF405 Template** - Reports follow the 8-section TF405 AAR format (General Info, Summary, Narrative, Friendly/Enemy Assessment, Intel, Recommendations, Conclusion)
-- **DOCX Export** - Converts reports to formatted Word documents with TF405 header banner, page numbering, and military-style formatting
+- **Configurable AAR Template** - Reports follow an 8-section military AAR format (General Info, Summary, Narrative, Friendly/Enemy Assessment, Intel, Recommendations, Conclusion); supply a custom `.docx` template via `--template` to apply your unit's branding
+- **DOCX Export** - Converts reports to formatted Word documents with custom header banner (from template .docx), page numbering, and military-style formatting
 - **Discord Integration** - Extracts pre-mission intelligence from Discord planning threads to enrich AAR sections
 - **Map Tile Scraper** - Downloads Leaflet map tiles for 64 Arma 3 maps from [Arma3Map](https://jetelain.github.io/Arma3Map/) with multithreaded downloads and resume support
 - **VLM Terrain Analyzer** - Uses a Vision Language Model to analyze map tiles and extract geological features, building types, vegetation, and tactical assessments
-- **Terrain-Aware Narratives** - Enriches combat reports with grid references, city names, and terrain context
-- **OpenClaw Skill** *(beta)* - Invoke the full AAR pipeline as an OpenClaw skill from any working directory via `AAR_PIPELINE_PATH`
+- **Terrain-Aware Narratives** - Enriches combat reports with grid references, city names, and terrain context (requires `tile_analyzer.py` to have been run for the map first)
+- **AI Agent Skill** *(beta)* - Generate AARs via a guided agent skill (Claude Code / OpenClaw) with semi-automated pipeline execution via `AAR_PIPELINE_PATH`
 
 ## Requirements
 
 - Python 3.11+
 - [LM Studio](https://lmstudio.ai/) (or any OpenAI-compatible API at `localhost:1234`)
-- **Text model**: Qwen 3.5 9B (for report generation)
+- **Text model**: Any instruction-following model (Qwen 3.5 9B recommended)
 - **Vision model** (optional): Qwen3-VL-4B (for terrain analysis)
 
 ## Quick Start
@@ -113,7 +113,26 @@ DISCORD_GUILD_ID=your_guild_id
 
 ```bash
 DATA_FILE=./mission.json.gz aar-pipeline
+
+# With a custom unit template
+DATA_FILE=./mission.json.gz aar-pipeline --template path/to/template.docx
 ```
+
+### Generate Briefing Data Only (no LLM)
+
+```bash
+DATA_FILE=./mission.json.gz aar-pipeline --briefing-only
+```
+
+Output: `test_output/briefing.txt` — structured mission data you can use to write the AAR manually.
+
+### Convert an Existing Report to DOCX
+
+```bash
+aar-pipeline --convert-only
+```
+
+Reads `test_output/combat_report.md` and produces `test_output/combat_report.docx`. Useful when editing the report by hand.
 
 ### Download Map Tiles
 
@@ -166,7 +185,7 @@ ocap-report-agent/
         cli.py               # Pipeline entry point
         loader.py            # Parses OCAP2 .json.gz replay files
         report_builder.py    # Structures mission data into LLM-ready briefing
-        report_generator.py  # Calls LLM API with TF405 template
+        report_generator.py  # Calls LLM API with configurable AAR template
         llm_client.py        # Shared LLM HTTP client
         discord_agent.py     # Discord thread intelligence extraction
         docx_converter.py    # Markdown to formatted Word conversion
