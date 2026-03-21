@@ -34,7 +34,7 @@ AAR_Template/*
 !AAR_Template/*.txt
 
 # Claude Code (local settings, plans, memory — but keep skills for distribution)
-.claude/
+.claude/*
 !.claude/skills/
 !.claude/skills/**
 

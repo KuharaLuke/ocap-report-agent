@@ -12,6 +12,7 @@ Generates After Action Reports from Arma 3 OCAP2 mission replay data using local
 - **Map Tile Scraper** - Downloads Leaflet map tiles for 64 Arma 3 maps from [Arma3Map](https://jetelain.github.io/Arma3Map/) with multithreaded downloads and resume support
 - **VLM Terrain Analyzer** - Uses a Vision Language Model to analyze map tiles and extract geological features, building types, vegetation, and tactical assessments
 - **Terrain-Aware Narratives** - Enriches combat reports with grid references, city names, and terrain context
+- **OpenClaw Skill** *(beta)* - Invoke the full AAR pipeline as an OpenClaw skill from any working directory via `AAR_PIPELINE_PATH`
 
 ## Requirements
 
@@ -59,13 +60,32 @@ pip install git+https://github.com/KuharaLuke/ocap-report-agent.git
 docker compose up
 ```
 
-### Claude Code Skill
+### AI Agent Skills (Claude Code / OpenClaw)
 
-If you use [Claude Code](https://claude.ai/code), the repo includes a skill:
+The repo ships a `generate-aar` skill that works with both Claude Code and OpenClaw.
+
+**Claude Code**
+
+If you use [Claude Code](https://claude.ai/code), the skill is automatically available when you open this repo:
 
 ```
 /generate-aar path/to/mission.json.gz
 ```
+
+**OpenClaw** *(beta)*
+
+1. Copy the skill folder to your OpenClaw global skills directory:
+   ```bash
+   cp -r .claude/skills/generate-aar ~/.openclaw/skills/
+   ```
+   Or place it in your workspace `skills/generate-aar/` for project-local use.
+
+2. Set `AAR_PIPELINE_PATH` to the absolute path of this cloned repo:
+   ```bash
+   export AAR_PIPELINE_PATH=/path/to/ocap-report-agent
+   ```
+
+3. Attach your `.json.gz` replay file and invoke the skill — OpenClaw will pick it up automatically.
 
 ## Configuration
 
@@ -77,6 +97,9 @@ DATA_FILE=./mission_replay.json.gz
 # Optional
 LLM_URL=http://127.0.0.1:1234
 OUTPUT_DIR=./test_output
+
+# Required when using the OpenClaw skill (not needed for CLI use)
+AAR_PIPELINE_PATH=/path/to/ocap-report-agent
 
 # Optional: Discord integration for pre-mission intel
 DISCORD_BOT_TOKEN=your_bot_token
