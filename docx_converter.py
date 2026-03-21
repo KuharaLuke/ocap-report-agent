@@ -90,8 +90,6 @@ class DocxConverter:
         header.is_linked_to_previous = False
         p = header.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(0)
         run = p.add_run()
         # Template image: 5731200 x 736600 EMU
         run.add_picture(str(_BANNER_PATH), width=Emu(5731200), height=Emu(736600))
@@ -186,6 +184,25 @@ class DocxConverter:
             if ("AFTER ACTION REPORT" in stripped.upper()
                     and not _MEMO_RE.match(stripped)):
                 self._add_title_line(stripped, size=Pt(12))
+                i += 1
+                continue
+
+            # Fallback: "OPERATION" line that got merged with a section header
+            # e.g. "OPERATION 1. GENERAL INFORMATION / INTRODUCTION"
+            if stripped.startswith("OPERATION "):
+                # Use non-anchored search to find "N. SECTION NAME" within the line
+                section_in_line = re.search(r"(\d+)\.\s+([A-Z].*)", stripped)
+                if section_in_line:
+                    # Split: emit the OPERATION part as a title, then the section header
+                    op_part = stripped[:section_in_line.start()].strip()
+                    sec_part = stripped[section_in_line.start():]
+                    if op_part:
+                        self._add_title_line(op_part + " - AFTER ACTION REPORT", size=Pt(12))
+                    self._add_section_header(sec_part)
+                    in_header = False
+                else:
+                    # Pure OPERATION line without embedded section
+                    self._add_title_line(stripped, size=Pt(12))
                 i += 1
                 continue
 

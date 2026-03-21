@@ -83,7 +83,7 @@ class ReportGenerator:
     def __init__(self, base_url: str = "http://127.0.0.1:1234") -> None:
         self._client = LLMClient(base_url)
 
-    ASSISTANT_PREFILL = "TASK FORCE 405\nTASK FORCE 405 - SWTG - F SQUADRON\nOPERATION "
+    ASSISTANT_PREFILL = "TASK FORCE 405\nTASK FORCE 405 - SWTG - F SQUADRON\n"
 
     def generate(
         self,
@@ -104,7 +104,15 @@ class ReportGenerator:
         user_content = (
             "Generate a complete After Action Report in formal prose from "
             "the following mission briefing data. Write the full document, "
-            "not an outline.\n\n" + briefing
+            "not an outline.\n\n"
+            "IMPORTANT: You MUST output the complete header block BEFORE section 1. "
+            "After the two TASK FORCE 405 lines, output:\n"
+            "- OPERATION [name] - AFTER ACTION REPORT\n"
+            "- [Location]\n"
+            "- [Date]\n"
+            "- MEMORANDUM FOR\n"
+            "- TO: / FROM: / SUBJECT: / REF: fields\n"
+            "Do NOT skip straight to section 1.\n\n" + briefing
         )
         if discord_context:
             user_content += (
