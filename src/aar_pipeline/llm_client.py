@@ -20,6 +20,7 @@ class LLMClient:
         temperature: float = 0.4,
         max_tokens: int = 8192,
         timeout: int = 180,
+        extra_report_markers: list[str] | None = None,
     ) -> str:
         """Send a chat completion request and return the content string.
 
@@ -53,10 +54,12 @@ class LLMClient:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
             raise RuntimeError(f"Unexpected API response format: {data}")
-        return self.strip_thinking(content)
+        return self.strip_thinking(content, extra_markers=extra_report_markers)
 
     @staticmethod
-    def strip_thinking(text: str) -> str:
+    def strip_thinking(
+        text: str, extra_markers: list[str] | None = None
+    ) -> str:
         """Remove reasoning/thinking traces from models like Qwen that emit CoT."""
         # Strip <think>...</think> blocks
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -66,7 +69,6 @@ class LLMClient:
 
         # Detect and strip untagged CoT (analysis steps before the report)
         report_markers = [
-            "TASK FORCE 405",
             "**AFTER ACTION",
             "# AFTER ACTION",
             "## AFTER ACTION",
@@ -80,6 +82,10 @@ class LLMClient:
             "# EXECUTIVE SUMMARY",
             "EXECUTIVE SUMMARY",
         ]
+        # Prepend unit-specific markers (highest priority)
+        if extra_markers:
+            report_markers = list(extra_markers) + report_markers
+
         for marker in report_markers:
             idx = text.find(marker)
             if idx > 0:

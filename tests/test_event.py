@@ -1,4 +1,4 @@
-from models.event import Event, HitEvent, KillEvent, GeneralEvent, ConnectionEvent
+from aar_pipeline.models.event import Event, HitEvent, KillEvent, GeneralEvent, ConnectionEvent
 
 
 class TestEventFactory:

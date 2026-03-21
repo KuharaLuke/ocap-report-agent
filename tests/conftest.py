@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from loader import MissionLoader
+from aar_pipeline.loader import MissionLoader
 
 DATA_FILE = PROJECT_ROOT / "2026_03_08__21_33_RandomPatrolGenerator.json.gz"
 TEST_OUTPUT = PROJECT_ROOT / "test_output"

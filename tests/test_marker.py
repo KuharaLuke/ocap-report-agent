@@ -1,4 +1,4 @@
-from models.marker import Marker
+from aar_pipeline.models.marker import Marker
 
 
 class TestMarker:

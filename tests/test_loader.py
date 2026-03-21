@@ -1,7 +1,7 @@
 import json
 
-from models.entity import VehicleEntity
-from models.event import KillEvent, HitEvent, GeneralEvent
+from aar_pipeline.models.entity import VehicleEntity
+from aar_pipeline.models.event import KillEvent, HitEvent, GeneralEvent
 
 
 class TestLoaderBasic:

@@ -1,5 +1,5 @@
-from models.event import KillEvent, HitEvent
-from models.entity import Entity
+from aar_pipeline.models.event import KillEvent, HitEvent
+from aar_pipeline.models.entity import Entity
 
 
 EXPECTED_PLAYER_NAMES = {

@@ -30,9 +30,13 @@ coverage.xml
 *.secret
 credentials*
 AAR_Template/*
+!AAR_Template/header_banner.png
+!AAR_Template/*.txt
 
-# Claude Code (local settings, plans, memory)
+# Claude Code (local settings, plans, memory — but keep skills for distribution)
 .claude/
+!.claude/skills/
+!.claude/skills/**
 
 # Mission replay data (large binary files)
 *.json.gz

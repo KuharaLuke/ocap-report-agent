@@ -1,7 +1,7 @@
 from math import sqrt
 
-from models.entity import Entity, InfantryEntity, VehicleEntity
-from models.position import PositionFrame
+from aar_pipeline.models.entity import Entity, InfantryEntity, VehicleEntity
+from aar_pipeline.models.position import PositionFrame
 
 
 def _make_raw_infantry():

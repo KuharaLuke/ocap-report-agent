@@ -4,11 +4,11 @@ import gzip
 import json
 from pathlib import Path
 
-from models.entity import Entity
-from models.event import Event
-from models.marker import Marker
-from models.mission import Mission
-from models.timeframe import TimeFrame
+from .models.entity import Entity
+from .models.event import Event
+from .models.marker import Marker
+from .models.mission import Mission
+from .models.timeframe import TimeFrame
 
 
 class MissionLoader:

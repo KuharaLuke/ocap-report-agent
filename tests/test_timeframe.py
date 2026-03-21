@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from models.timeframe import TimeFrame
+from aar_pipeline.models.timeframe import TimeFrame
 
 
 class TestTimeFrame:

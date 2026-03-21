@@ -1,4 +1,4 @@
-from models.position import PositionFrame
+from aar_pipeline.models.position import PositionFrame
 
 
 class TestPositionFrame:

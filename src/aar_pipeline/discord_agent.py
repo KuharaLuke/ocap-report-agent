@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from llm_client import LLMClient
+from .llm_client import LLMClient
 
 
 class DiscordAgent:

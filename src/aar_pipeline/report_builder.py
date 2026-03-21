@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 from collections import Counter
 
-from models.entity import VehicleEntity
-from models.event import ConnectionEvent, KillEvent
-from models.mission import Mission
+from .models.entity import VehicleEntity
+from .models.event import ConnectionEvent, KillEvent
+from .models.mission import Mission
 
 
 class ReportBuilder:
