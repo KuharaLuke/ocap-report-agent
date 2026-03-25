@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import time
 from datetime import datetime, timezone
 
@@ -50,6 +51,7 @@ class DiscordAgent:
         self._session.headers.update({
             "Authorization": f"Bot {bot_token}",
         })
+        self._vision_available: bool | None = None  # None=untested, True=works, False=text-only
 
     def fetch_context(self, mission_date_utc: str) -> str | None:
         """Main entry point. Returns structured intel text or None on failure.
@@ -208,6 +210,58 @@ class DiscordAgent:
     # LLM summarization
     # ------------------------------------------------------------------
 
+    _VLM_ERROR_KEYWORDS = ("image", "vision", "multimodal", "not support", "unsupported")
+
+    def _extract_image_text(self, attachment: dict) -> str | None:
+        """Download an image attachment and use the vision LLM to extract its text.
+
+        Returns extracted text, a placeholder string on failure, or None if the
+        image contains no readable text. Sets _vision_available=False on the first
+        response indicating the endpoint does not support vision input.
+        """
+        filename = attachment.get("filename", "image")
+
+        if self._vision_available is False:
+            return f"[Image: {filename} — load a vision model in LM Studio]"
+
+        url = attachment.get("url", "")
+        try:
+            img_resp = requests.get(url, timeout=30)
+            img_resp.raise_for_status()
+        except Exception as e:
+            print(f"  Warning: could not download image '{filename}': {e}")
+            return f"[Image: {filename} — download failed]"
+
+        try:
+            content_type = img_resp.headers.get("Content-Type", "image/png").split(";")[0].strip()
+            b64 = base64.b64encode(img_resp.content).decode()
+            data_uri = f"data:{content_type};base64,{b64}"
+            vision_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract all readable text from this image. Output only the extracted text, nothing else."},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ]
+            text = self._llm.chat(vision_messages, temperature=0.1, max_tokens=1024)
+            self._vision_available = True
+            return text.strip() if text.strip() else None
+
+        except RuntimeError as e:
+            err = str(e).lower()
+            if any(kw in err for kw in self._VLM_ERROR_KEYWORDS) or "400" in err or "422" in err:
+                self._vision_available = False
+                print("  Warning: LM Studio model does not support vision — image text will be skipped.")
+                return f"[Image: {filename} — load a vision model in LM Studio]"
+            print(f"  Warning: could not extract text from image '{filename}': {e}")
+            return f"[Image: {filename} — extraction failed]"
+
+        except Exception as e:
+            print(f"  Warning: could not extract text from image '{filename}': {e}")
+            return f"[Image: {filename} — extraction failed]"
+
     def _summarize_thread(self, messages: list[dict]) -> str:
         """Use LLM to extract structured intel from Discord messages."""
         formatted = []
@@ -219,6 +273,12 @@ class DiscordAgent:
                 desc = embed.get("description", "")
                 if desc:
                     content += f"\n[Embed: {desc}]"
+            # Include text extracted from image attachments
+            for attachment in msg.get("attachments", []):
+                if attachment.get("content_type", "").startswith("image/"):
+                    extracted = self._extract_image_text(attachment)
+                    if extracted:
+                        content += f"\n[Image text: {extracted}]"
             if not content:
                 continue
             timestamp = msg.get("timestamp", "")[:19]
