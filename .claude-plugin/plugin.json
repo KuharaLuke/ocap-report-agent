@@ -1,0 +1,5 @@
+{
+  "name": "aar-pipeline",
+  "version": "0.1.0",
+  "description": "Generate After Action Reports from OCAP2 Arma 3 mission replays"
+}

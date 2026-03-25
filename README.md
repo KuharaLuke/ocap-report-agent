@@ -62,30 +62,46 @@ docker compose up
 
 ### AI Agent Skills (Claude Code / OpenClaw)
 
-The repo ships a `generate-aar` skill that works with both Claude Code and OpenClaw.
+The repo ships a `generate-aar` skill and is a **Claude Code plugin**, so it works with both Claude Code and OpenClaw.
 
-**Claude Code**
+**Claude Code — in-repo use**
 
-If you use [Claude Code](https://claude.ai/code), the skill is automatically available when you open this repo:
+When you open this repo in Claude Code the skill is available automatically:
 
 ```
 /generate-aar path/to/mission.json.gz
 ```
 
+**Claude Code — plugin install** *(beta)*
+
+Install the repo as a plugin so the skill is available from any project:
+
+```bash
+claude plugin install https://github.com/KuharaLuke/ocap-report-agent
+```
+
+Then set `AAR_PIPELINE_PATH` to the cloned repo location so the skill can find the Python pipeline:
+
+```bash
+export AAR_PIPELINE_PATH=/path/to/ocap-report-agent
+```
+
 **OpenClaw** *(beta)*
 
-1. Copy the skill folder to your OpenClaw global skills directory:
+1. Install as a plugin or copy the skill to your global skills directory:
    ```bash
-   cp -r .claude/skills/generate-aar ~/.openclaw/skills/
-   ```
-   Or place it in your workspace `skills/generate-aar/` for project-local use.
+   # As a plugin (auto-discovers skills/)
+   cp -r skills/generate-aar ~/.openclaw/skills/
 
-2. Set `AAR_PIPELINE_PATH` to the absolute path of this cloned repo:
+   # Or point OpenClaw at the repo directly
+   ```
+
+2. Set `AAR_PIPELINE_PATH`:
    ```bash
    export AAR_PIPELINE_PATH=/path/to/ocap-report-agent
    ```
 
-3. Attach your `.json.gz` replay file and invoke the skill — OpenClaw will pick it up automatically.
+3. Attach your `.json.gz` replay file and invoke `/generate-aar`.
 
 ## Configuration
 
