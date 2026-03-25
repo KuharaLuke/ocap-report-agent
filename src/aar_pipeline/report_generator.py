@@ -1,4 +1,4 @@
-"""Sends a mission briefing to a local LLM and returns the generated report."""
+"""Sends a mission briefing to an LLM and returns the generated report."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ from .template_config import TemplateConfig
 
 
 class ReportGenerator:
-    """Calls an OpenAI-compatible chat completions endpoint (e.g. LM Studio)."""
+    """Calls an LLM endpoint to generate an After Action Report.
+
+    Supports both OpenAI-compatible (LM Studio) and Anthropic backends via
+    the provider argument forwarded to LLMClient.
+    """
 
     _seen_hashes: ClassVar[set[str]] = set()
 
@@ -17,8 +21,10 @@ class ReportGenerator:
         self,
         base_url: str = "http://127.0.0.1:1234",
         template: TemplateConfig | None = None,
+        provider: str = "auto",
+        api_key: str | None = None,
     ) -> None:
-        self._client = LLMClient(base_url)
+        self._client = LLMClient(base_url, provider=provider, api_key=api_key)
         self._template = template or TemplateConfig.default()
         self._prefill = f"{self._template.unit_name}\n{self._template.unit_subline}\n"
 

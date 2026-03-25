@@ -74,6 +74,8 @@ def main() -> None:
     # Resolve config: CLI arg > env var > default
     llm_url = args.llm_url or os.environ.get("LLM_URL", "http://127.0.0.1:1234")
     output_dir = Path(args.output_dir or os.environ.get("OUTPUT_DIR", "./test_output"))
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    provider = "anthropic" if api_key else "openai"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load template
@@ -167,7 +169,7 @@ def main() -> None:
         from .discord_agent import DiscordAgent
         from .llm_client import LLMClient
         print("Fetching Discord planning context ...")
-        llm = LLMClient(base_url=llm_url)
+        llm = LLMClient(base_url=llm_url, provider=provider, api_key=api_key)
         agent = DiscordAgent(
             bot_token=discord_token,
             channel_id=discord_channel,
@@ -210,8 +212,9 @@ def main() -> None:
 
     # 4. Generate report via LLM
     from .report_generator import ReportGenerator
-    print(f"Sending to LLM at {llm_url} ...")
-    generator = ReportGenerator(base_url=llm_url, template=template)
+    backend = "Anthropic API" if provider == "anthropic" else f"LM Studio at {llm_url}"
+    print(f"Sending to {backend} ...")
+    generator = ReportGenerator(base_url=llm_url, template=template, provider=provider, api_key=api_key)
     try:
         report = generator.generate(briefing, discord_context=discord_context)
     except (ConnectionError, TimeoutError, RuntimeError) as e:
