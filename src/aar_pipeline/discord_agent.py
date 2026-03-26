@@ -181,23 +181,51 @@ class DiscordAgent:
     # Thread matching
     # ------------------------------------------------------------------
 
+    MAX_THREAD_DELTA_DAYS = 7  # threads further than this from the mission date are ignored
+
     def _find_closest_thread(
         self, threads: list[dict], mission_date: datetime
     ) -> dict | None:
-        """Find the thread whose creation time is closest to mission_date."""
+        """Find the thread whose last activity is closest to mission_date.
+
+        Uses archive_timestamp for archived threads and last_message_id for
+        active threads — both reflect when the planning discussion ended,
+        which is a better proxy for the mission date than thread creation time.
+        Threads further than MAX_THREAD_DELTA_DAYS away are ignored.
+        """
         if not threads:
             return None
 
         best_thread = None
         best_delta = None
+        max_delta_secs = self.MAX_THREAD_DELTA_DAYS * 86400
 
         for thread in threads:
-            thread_dt = self._snowflake_to_datetime(thread["id"])
+            meta = thread.get("thread_metadata", {})
+            archive_ts = meta.get("archive_timestamp")
+            if archive_ts:
+                try:
+                    thread_dt = datetime.fromisoformat(
+                        archive_ts.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    thread_dt = self._snowflake_to_datetime(thread["id"])
+            else:
+                last_msg_id = thread.get("last_message_id")
+                if last_msg_id:
+                    thread_dt = self._snowflake_to_datetime(last_msg_id)
+                else:
+                    thread_dt = self._snowflake_to_datetime(thread["id"])
+
             delta = abs((thread_dt - mission_date).total_seconds())
+            if delta > max_delta_secs:
+                continue
             if best_delta is None or delta < best_delta:
                 best_delta = delta
                 best_thread = thread
 
+        if best_thread and best_delta is not None:
+            print(f"  Thread delta: {best_delta / 3600:.1f}h from mission time")
         return best_thread
 
     @classmethod

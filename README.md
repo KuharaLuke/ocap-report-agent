@@ -127,6 +127,9 @@ DATA_FILE=./mission_replay.json.gz
 ANTHROPIC_API_KEY=sk-ant-...          # Use Claude (auto-detected when set)
 LLM_URL=http://127.0.0.1:1234        # Use LM Studio (default when no API key)
 
+# Optional: custom Anthropic-compatible base URL (proxy / OpenClaw relay)
+# ANTHROPIC_BASE_URL=https://api.anthropic.com
+
 # Output
 OUTPUT_DIR=./test_output
 

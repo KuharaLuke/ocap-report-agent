@@ -17,7 +17,7 @@ class LLMClient:
     - ``"anthropic"``: always use the Anthropic Messages API.
     """
 
-    ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+    ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com"
     DEFAULT_OPENAI_MODEL = "qwen/qwen3.5-9b"
     DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
@@ -32,7 +32,8 @@ class LLMClient:
         self.provider = provider
 
         if provider == "anthropic":
-            self.url = self.ANTHROPIC_URL
+            anthropic_base = os.environ.get("ANTHROPIC_BASE_URL", self.ANTHROPIC_DEFAULT_URL)
+            self.url = f"{anthropic_base.rstrip('/')}/v1/messages"
             key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
             self._headers: dict[str, str] = {
                 "x-api-key": key,
@@ -122,6 +123,13 @@ class LLMClient:
                 user_messages.append(msg)
 
         converted = self._convert_messages_for_anthropic(user_messages)
+
+        # Anthropic rejects trailing whitespace in the final assistant prefill
+        if converted and converted[-1].get("role") == "assistant":
+            last = converted[-1]
+            content = last.get("content", "")
+            if isinstance(content, str):
+                converted[-1] = {**last, "content": content.rstrip()}
 
         payload: dict = {
             "model": model or self.DEFAULT_ANTHROPIC_MODEL,
